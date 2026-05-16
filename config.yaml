@@ -1,0 +1,33 @@
+# ============================================================
+# Chess Agent 配置文件
+# 本文件包含 DeepSeek API 配置和棋局分析 Agent 的行为参数。
+# 请将 api_key 填写为你的真实 DeepSeek API Key。
+# ============================================================
+
+deepseek:
+  api_key: "sk-64aa532b43fe485db8fe450079d3a9b4"
+  base_url: "https://api.deepseek.com"
+  model_name: "deepseek-v4-flash"
+  temperature: 0.3
+  max_tokens: 1500
+  timeout: 60
+
+# 棋局状态输出控制：哪些信息发送给大模型
+board_output:
+  include_fen: true
+  include_board_matrix: true
+  include_piece_list: true
+  include_legal_moves: true
+  include_turn: true
+  include_castling_rights: true
+  include_en_passant: true
+  include_check_status: true
+  include_move_history: true
+
+# Agent 输出控制
+agent_output:
+  require_json: true
+  include_best_move: true
+  include_candidate_moves: true
+  include_child_explanation: true
+  include_risk_analysis: true

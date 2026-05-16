@@ -1,0 +1,30 @@
+# ============================================================
+# Chess Agent 配置文件示例
+# 复制此文件为 config.yaml 并填写你的 DeepSeek API Key。
+# ============================================================
+
+deepseek:
+  api_key: "在这里填写你的 DeepSeek API Key"
+  base_url: "https://api.deepseek.com/v1"
+  model_name: "deepseek-v4-flash"  # 推荐使用速度更快的模型
+  temperature: 0.3
+  max_tokens: 1500
+  timeout: 60
+
+board_output:
+  include_fen: true
+  include_board_matrix: true
+  include_piece_list: true
+  include_legal_moves: true
+  include_turn: true
+  include_castling_rights: true
+  include_en_passant: true
+  include_check_status: true
+  include_move_history: true
+
+agent_output:
+  require_json: true
+  include_best_move: true
+  include_candidate_moves: true
+  include_child_explanation: true
+  include_risk_analysis: true

@@ -5,22 +5,23 @@ chess_agent.py — 国际象棋教学 Agent
 实现完整的棋局分析流程：
   1. 读取当前棋局状态
   2. 构造 system prompt + user prompt
-  3. 调用 DeepSeek 大模型
-  4. 解析模型返回的 JSON
+  3. 先调用 Stockfish 计算最佳走法
+  4. 再调用 DeepSeek 生成教学解说
+  5. 解析模型返回的标签文本
   5. 用 python-chess 验证推荐走法是否合法
   6. 返回结构化分析结果
 
 【Python 学习要点】：
 1. 模块组合 (Module Composition)：将不同功能的 Python 文件导入并组合使用。
    - 应用场景：当项目变大时，千万不要把所有代码写在一个文件里。按功能拆分成多个模块（如 UI、网络、数据处理）然后组装，是工程化开发的基础。
-2. JSON 处理 (JSON Parsing)：通过 `json.loads` 将文本转换为 Python 字典。
-   - 应用场景：Web 开发、API 调用、读取配置文件等，绝大多数现代程序都在用 JSON 交换数据。
+2. 文本解析：从带标签的文本里提取字段。
+   - 应用场景：当外部系统返回的不是标准 JSON，而是固定格式文本时，可以用正则或字符串处理把信息拆出来。
 3. 字典取值 (Dictionary `.get()`): 深入学习如何使用 `.get()` 方法安全获取数据并提供默认值。
    - 应用场景：当你处理从外部（如大模型、网络请求）返回的数据时，你永远不能 100% 确定某个字段一定存在，用 `.get()` 可以避免程序因为找不到字段而崩溃。
 """
 
 import os
-import json
+import re
 import chess
 import board_serializer
 import deepseek_client
@@ -77,11 +78,7 @@ You must output your response in the following EXACT text format using these tag
 [WARNINGS] 战术警告1 | 战术警告2 (如果没有警告，请填写"无")
 """
 
-
 # ==================== 文本解析工具 ====================
-
-
-import re
 
 
 def _extract_tags(raw_response: str) -> dict:
@@ -164,6 +161,82 @@ def _validate_move(board: chess.Board, uci_str: str) -> dict:
         }
 
 
+def _build_stockfish_analysis(board: chess.Board) -> tuple[str, str | None]:
+    """
+    调用 Stockfish，并把分析结果整理成追加到 prompt 的文本。
+    返回值：
+    - analysis_text: 给大模型看的补充说明
+    - error_msg: 如果调用失败，返回错误信息
+    """
+    engine = None
+    try:
+        from stockfish import Stockfish
+
+        engine = Stockfish(path=STOCKFISH_PATH)
+        engine.set_fen_position(board.fen())
+        engine.set_depth(15)
+
+        best_move = engine.get_best_move()
+        evaluation = engine.get_evaluation()
+        top_moves = engine.get_top_moves(3)
+
+        analysis_lines = [
+            "",
+            "",
+            "[STOCKFISH ANALYSIS (ABSOLUTE TRUTH)]",
+            f"- Best move: {best_move}",
+        ]
+
+        if evaluation["type"] == "cp":
+            score = evaluation["value"] / 100.0
+            analysis_lines.append(
+                "- Evaluation: "
+                f"{score} (positive=White advantage, negative=Black advantage)"
+            )
+        elif evaluation["type"] == "mate":
+            analysis_lines.append(f"- Evaluation: Mate in {evaluation['value']} moves")
+
+        analysis_lines.append("- Top candidate moves:")
+        for index, move_info in enumerate(top_moves, 1):
+            centipawn = move_info.get("Centipawn")
+            mate = move_info.get("Mate")
+            score_text = (
+                f"Centipawn: {centipawn}"
+                if centipawn is not None
+                else f"Mate: {mate}"
+            )
+            analysis_lines.append(f"  {index}. {move_info['Move']} ({score_text})")
+
+        return "\n".join(analysis_lines), None
+    except Exception as exc:
+        return "", f"Stockfish 引擎调用失败，无法进行棋局分析: {exc}"
+    finally:
+        if engine is not None:
+            del engine
+
+
+def _build_agent_error_result(serialized: dict, error_msg: str) -> dict:
+    """
+    构造统一的失败返回值，避免异常分支里重复拼字典。
+    """
+    return {
+        "raw_response": "",
+        # 这里沿用 parsed_json 这个字段名，是为了兼容现有 UI 调用。
+        "parsed_json": None,
+        "json_parse_error": error_msg,
+        "best_move_uci": None,
+        "best_move_san": None,
+        "is_legal": False,
+        "validation_message": error_msg,
+        "candidate_moves": [],
+        "position_summary": "抱歉，算力引擎掉线了，我没法帮你看棋了。",
+        "child_explanation": "哎呀，我的超级大脑(Stockfish)罢工了，现在算不出准确的走法，请检查一下配置哦！",
+        "plan": "",
+        "tactical_warnings": [],
+        "serialized_board": serialized,
+    }
+
+
 # ==================== Agent 主入口 ====================
 
 
@@ -192,58 +265,12 @@ def ask_chess_agent(
     user_prompt = board_serializer.build_user_prompt(serialized, user_question)
 
     # ---- 3. 调用 Stockfish 引擎进行绝对准确的计算 ----
-    stockfish_analysis = ""
-    engine = None
-    try:
-        from stockfish import Stockfish
-
-        engine = Stockfish(path=STOCKFISH_PATH)
-        engine.set_fen_position(board.fen())
-        engine.set_depth(15)  # 设置一个合理的搜索深度
-        best_move = engine.get_best_move()
-        evaluation = engine.get_evaluation()
-
-        # 将 Stockfish 的结论加入到 prompt 中
-        stockfish_analysis = "\n\n[STOCKFISH ANALYSIS (ABSOLUTE TRUTH)]\n"
-        stockfish_analysis += f"- Best move: {best_move}\n"
-
-        if evaluation["type"] == "cp":
-            # centipawns: positive means white is better, negative means black is better
-            score = evaluation["value"] / 100.0
-            stockfish_analysis += f"- Evaluation: {score} (positive=White advantage, negative=Black advantage)\n"
-        elif evaluation["type"] == "mate":
-            mate_in = evaluation["value"]
-            stockfish_analysis += f"- Evaluation: Mate in {mate_in} moves\n"
-
-        # 让 Stockfish 也推荐前三的候选走法
-        top_moves = engine.get_top_moves(3)
-        stockfish_analysis += "- Top candidate moves:\n"
-        for i, m in enumerate(top_moves):
-            stockfish_analysis += f"  {i+1}. {m['Move']} (Centipawn: {m.get('Centipawn', 'Mate ' + str(m.get('Mate', '')))}) \n"
-
-        user_prompt += stockfish_analysis
-
-    except Exception as e:
-        error_msg = f"Stockfish 引擎调用失败，无法进行棋局分析: {e}"
+    stockfish_analysis, error_msg = _build_stockfish_analysis(board)
+    if error_msg is not None:
         print(f"[Agent] Error: {error_msg}")
-        return {
-            "raw_response": "",
-            "parsed_json": None,
-            "json_parse_error": error_msg,
-            "best_move_uci": None,
-            "best_move_san": None,
-            "is_legal": False,
-            "validation_message": error_msg,
-            "candidate_moves": [],
-            "position_summary": "抱歉，算力引擎掉线了，我没法帮你看棋了。",
-            "child_explanation": "哎呀，我的超级大脑(Stockfish)罢工了，现在算不出准确的走法，请检查一下配置哦！",
-            "plan": "",
-            "tactical_warnings": [],
-            "serialized_board": serialized,
-        }
-    finally:
-        if engine is not None:
-            del engine  # 清理引擎进程释放资源
+        return _build_agent_error_result(serialized, error_msg)
+
+    user_prompt += stockfish_analysis
 
     # ---- 4. 调用 DeepSeek API ----
     client = deepseek_client.create_client(config)
@@ -257,18 +284,18 @@ def ask_chess_agent(
     ):
         raw_response += chunk
         if stream_callback:
-            parsed_data = _extract_tags(raw_response)
+            parsed_tags = _extract_tags(raw_response)
             partial_result = {
-                "parsed_json": parsed_data,
-                "best_move_uci": parsed_data.get("best_move_uci"),
-                "best_move_san": parsed_data.get("best_move_san"),
+                "parsed_json": parsed_tags,
+                "best_move_uci": parsed_tags.get("best_move_uci"),
+                "best_move_san": parsed_tags.get("best_move_san"),
                 "is_legal": None,
             }
             stream_callback(partial_result)
 
     # ---- 5. 解析最终文本 ----
-    parsed_json = _extract_tags(raw_response)
-    json_error = None
+    parsed_tags = _extract_tags(raw_response)
+    parse_error = None
 
     # ---- 6. 提取关键字段 ----
     # 给定默认值
@@ -282,15 +309,16 @@ def ask_chess_agent(
     plan = ""
     tactical_warnings = []
 
-    if parsed_json is not None:
+    if parsed_tags is not None:
         # 使用 dict.get() 安全地获取键值。如果键不存在，则返回指定的默认值。
-        best_move_uci = parsed_json.get("best_move_uci")
-        best_move_san = parsed_json.get("best_move_san")
-        candidate_moves = parsed_json.get("candidate_moves", [])
-        position_summary = parsed_json.get("position_summary", "")
-        child_explanation = parsed_json.get("child_explanation", "")
-        plan = parsed_json.get("plan", "")
-        tactical_warnings = parsed_json.get("tactical_warnings", [])
+        best_move_uci = parsed_tags.get("best_move_uci")
+        best_move_san = parsed_tags.get("best_move_san")
+        # 当前标签格式没有返回候选走法，这里保留字段是为了兼容现有展示结构。
+        candidate_moves = parsed_tags.get("candidate_moves", [])
+        position_summary = parsed_tags.get("position_summary", "")
+        child_explanation = parsed_tags.get("child_explanation", "")
+        plan = parsed_tags.get("plan", "")
+        tactical_warnings = parsed_tags.get("tactical_warnings", [])
 
         # ---- 7. 验证推荐走法是否合法 ----
         if best_move_uci:
@@ -304,13 +332,14 @@ def ask_chess_agent(
         else:
             validation_message = "模型没有返回可验证的 UCI 走法。"
     else:
-        validation_message = f"模型输出无法解析为 JSON。解析错误: {json_error}"
+        validation_message = f"模型输出无法解析为标签文本。解析错误: {parse_error}"
 
     # 返回组装好的完整结果字典
     return {
         "raw_response": raw_response,
-        "parsed_json": parsed_json,
-        "json_parse_error": json_error,
+        # 为了兼容现有 UI，这里继续沿用 parsed_json 这个键名。
+        "parsed_json": parsed_tags,
+        "json_parse_error": parse_error,
         "best_move_uci": best_move_uci,
         "best_move_san": best_move_san,
         "is_legal": is_legal,
@@ -395,7 +424,7 @@ def print_agent_result(result: dict) -> None:
             print(f"  - {w}")
 
     if result.get("json_parse_error"):
-        print("\n⚠️  JSON 解析失败，以下为模型原始回复:")
+        print("\n⚠️  标签解析失败，以下为模型原始回复:")
         print("---")
         print(result.get("raw_response", "(空)"))
         print("---")
@@ -447,7 +476,7 @@ def format_kid_display(result: dict) -> dict:
         info["plan"] = parsed.get("plan") or ""
         info["tactical_warnings"] = parsed.get("tactical_warnings") or []
     else:
-        # JSON 解析失败时的降级处理
+        # 标签解析失败时的降级处理
         info["best_move_san"] = result.get("best_move_san") or ""
         info["best_move_uci"] = result.get("best_move_uci") or ""
         info["child_explanation"] = result.get("child_explanation") or ""

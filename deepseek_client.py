@@ -25,6 +25,16 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.y
 # ==================== 配置加载 ====================
 
 
+def _exit_with_message(*lines: str) -> None:
+    """
+    打印配置错误信息，然后退出程序。
+    把重复的 print + sys.exit(1) 收拢到一个地方，更容易维护。
+    """
+    for line in lines:
+        print(line)
+    sys.exit(1)
+
+
 def load_config(config_path: str = None) -> dict:
     """
     加载 config.yaml 配置文件，返回完整配置字典。
@@ -40,9 +50,10 @@ def load_config(config_path: str = None) -> dict:
 
     # 检查配置文件是否存在
     if not os.path.exists(path):
-        print("请先创建 config.yaml，并填写 DeepSeek API Key。")
-        print("可以参考 config.example.yaml 创建。")
-        sys.exit(1)
+        _exit_with_message(
+            "请先创建 config.yaml，并填写 DeepSeek API Key。",
+            "可以参考 config.example.yaml 创建。",
+        )
 
     # 读取 YAML 文件
     with open(path, "r", encoding="utf-8") as f:
@@ -51,14 +62,12 @@ def load_config(config_path: str = None) -> dict:
 
     # 检查内容是否为空
     if config is None:
-        print("config.yaml 内容为空，请填写配置。")
-        sys.exit(1)
+        _exit_with_message("config.yaml 内容为空，请填写配置。")
 
     # 获取深层字典中的值时，推荐使用 .get() 连续调用以防止 KeyError
     api_key = config.get("deepseek", {}).get("api_key", "")
     if not api_key or api_key == "在这里填写你的 DeepSeek API Key":
-        print("DeepSeek API Key 为空，请先在 config.yaml 中填写 api_key。")
-        sys.exit(1)
+        _exit_with_message("DeepSeek API Key 为空，请先在 config.yaml 中填写 api_key。")
 
     return config
 
@@ -125,12 +134,13 @@ def chat_completion(
                 yield content
     except Exception as e:
         # 如果请求失败（比如没网、超时等），捕获异常并返回友好的中文提示
-        error_msg = str(e).lower()
+        raw_error = str(e)
+        error_msg = raw_error.lower()
         if "timeout" in error_msg or "timed out" in error_msg:
             yield "[错误] API 调用超时。请检查网络连接或增加 config.yaml 中的 timeout 值。"
         elif "connection" in error_msg:
-            yield f"[错误] 网络连接失败，请检查网络。详细信息: {str(e)}"
+            yield f"[错误] 网络连接失败，请检查网络。详细信息: {raw_error}"
         elif "api_key" in error_msg or "authentication" in error_msg:
-            yield f"[错误] API Key 认证失败，请检查 config.yaml 中的 api_key。详细信息: {str(e)}"
+            yield f"[错误] API Key 认证失败，请检查 config.yaml 中的 api_key。详细信息: {raw_error}"
         else:
-            yield f"[错误] API 调用发生未知错误: {str(e)}"
+            yield f"[错误] API 调用发生未知错误: {raw_error}"

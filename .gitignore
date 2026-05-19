@@ -1,2 +1,5 @@
 __pycache__/
 stockfish_bin/
+.env
+config.yaml
+.claude/settings.local.json

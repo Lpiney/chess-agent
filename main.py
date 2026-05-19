@@ -1674,14 +1674,15 @@ def _submit_question(board, panel):
     panel["cursor"] = 0
     panel["thinking"] = True
     panel["result"] = None
+    panel["stream_result"] = None
     panel["error"] = None
     # 使用 board.copy() 确保线程安全：后台线程读取的是当前局面的快照
-    t = threading.Thread(
+    worker = threading.Thread(
         target=_agent_thread_fn,
         args=(board.copy(), question, panel),
         daemon=True,
     )
-    t.start()
+    worker.start()
 
 
 def run_game(win, pieces, difficulty_key):
